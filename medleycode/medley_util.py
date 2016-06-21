@@ -2,7 +2,7 @@ import os
 import librosa
 import numpy as np
 from sklearn.neighbors import BallTree
-
+import collections
 
 
 class Seg(object):
@@ -29,6 +29,7 @@ class Seg(object):
         self.songname = songname
         self.mfcc_size = mfcc_size
         self.chroma_size = 12
+        self.idx = -1           # order in the segments
 
         self.extract()
 
@@ -74,17 +75,25 @@ class Segments(object):
     it is an array of different segments
     segments: a list of Seg objects
     """
-    def __init__(self, songDir, setName):
+    def __init__(self, songDir, setName, doMash = False, useDiffSong = True):
         """
         For every song in the directory, analyze the song
         """
         self.segments = []
+        self.treeSize = 0
+        self.mashPairs = collections.defaultdict()
         for (root, dirnames,files) in os.walk(songDir):
             for name in files:
                 if name.endswith(".wav") :
                     print name
                     songpath = os.path.join(root,name)
                     self.analyze(name[:-4],songpath, setName)
+
+        if doMash:
+            # Construct the tree
+            self.construct_tree()
+            # Do medley
+            self.doMashup(useDiffSong)
 
     def get_segment(self, i):
         return self.segments[i]
@@ -111,25 +120,48 @@ class Segments(object):
         self.mfcc_size = currSeg.mfcc_size            
         self.chroma_size = currSeg.chroma_size
         self.rms_size = 1
-        #self.construct_tree()
+        
+        
             
     def construct_tree(self):
         # construct a tree with the mfcc of the 1st frame of each seg, and beat chroma 
         self.feature_size = self.mfcc_size + self.chroma_size + self.rms_size
-        X = np.zeros((len(self.segments), self.mfcc_size + self.chroma_size))
+        X = np.zeros((len(self.segments), self.feature_size))
         for idx, seg in enumerate(self.segments):
-            X[idx,0:self.mfcc_size] = seg.get_head_mfcc()
-            X[idx,self.mfcc_size:] = seg.get_head_chroma()
-        self.tree = BallTree(X, leaf_size=2)
+            X[idx,0:self.mfcc_size] = seg.get_head_mfcc(n=1)
+            X[idx,self.mfcc_size:-self.rms_size] = seg.get_head_chroma(n=1)
+            X[idx,-self.rms_size:] = seg.get_head_rms(n=5)
+            seg.idx = self.treeSize
+            self.treeSize += 1
+            #X = np.array(X).reshape((1,-1))
 
 
-    def find_best_match(segsOBJ, query_seg_idx, diffSong = False):    
-        f1 = segs.get_segment(query_seg_idx).get_tail_mfcc()
-        f2 = segs.get_segment(query_seg_idx).get_tail_chroma()
-        f3 = segs.get_segment(query_seg_idx).get_tail_rms()
+        def mydist(x, y):
+            
+            #xChroma = x[0:12]
+            #yChroma = y[0:12]
+            #xMfcc = x[12:38]
+            #yMfcc = y[12:38]
+            #xRms = x[38]
+            #yRms = y[38]
+            
+            #dist = spatial.distance.cosine(xChroma,yChroma) + beta * np.sum((xMfcc-yMfcc)**2)/5000.  +                   theta * np.sum((xRms-yRms)**2)
+            dist = np.sum((x-y)**2)
+            #dist = alpha * np.sum((xChroma-yChroma)**2) + beta * np.sum((xMfcc-yMfcc)**2)/5000.  +  \
+             #    theta * np.sum((xRms-yRms)**2)  #+ np.sum((xEd-ySt)**2)
+            return dist
+
+        self.tree = BallTree(X, leaf_size=2, metric = 'pyfunc',func = mydist)
+
+
+    def find_best_match(self, query_seg_idx, diffSong = False):    
+        f1 = self.get_segment(query_seg_idx).get_tail_mfcc()
+        f2 = self.get_segment(query_seg_idx).get_tail_chroma()
+        f3 = self.get_segment(query_seg_idx).get_tail_rms()
         query_f = np.hstack((f1,f2))
         query_f = np.hstack((query_f,f3))
-        dist, idx = segsOBJ.tree.query(query_f, k=20)
+        query_f = np.array(query_f).reshape((1,-1))
+        dist, idx = self.tree.query(query_f, k=20)
         idx = idx[0]
         # remove query_seg_idx from the list
         idx = [p for p in idx if p != query_seg_idx]
@@ -137,3 +169,13 @@ class Segments(object):
             tmp = [p for p in idx if self.segments[p].songname != self.segments[query_seg_idx].songname]
             return tmp[0]
         return idx[0]
+
+    def doMashup(self, useDiffSong):
+        """
+        Do pairs of music mashups depending on the starting point
+        """
+        for i in range(self.treeSize):
+            self.mashPairs[i] = self.find_best_match(i,useDiffSong)
+
+
+
