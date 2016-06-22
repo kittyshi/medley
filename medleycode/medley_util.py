@@ -1,8 +1,9 @@
 import os
 import librosa
 import numpy as np
-from sklearn.neighbors import BallTree
 import collections
+from sklearn.neighbors import BallTree
+from scipy import spatial
 
 
 class Seg(object):
@@ -30,7 +31,7 @@ class Seg(object):
         self.mfcc_size = mfcc_size
         self.chroma_size = 12
         self.idx = -1           # order in the segments
-
+        self.featureV = []      # feature vector
         self.extract()
 
     def extract(self):
@@ -67,6 +68,17 @@ class Seg(object):
         return np.median(self.rms[:,n-1])
         #return self.rms(:,n-1)
 
+    def get_seg_feature(self):
+        """
+        Get the feature vector of the segment
+        """
+        f1 = self.get_tail_mfcc()
+        f2 = self.get_tail_chroma()
+        f3 = self.get_tail_rms()
+        f = np.hstack((f1,f2))
+        f = np.hstack((f,f3))
+        self.featureV = np.array(f).reshape((1,-1))
+        return self.featureV
 
 
 class Segments(object):
@@ -75,13 +87,14 @@ class Segments(object):
     it is an array of different segments
     segments: a list of Seg objects
     """
+    
     def __init__(self, songDir, setName, doMash = False, useDiffSong = True):
         """
         For every song in the directory, analyze the song
         """
         self.segments = []
-        self.treeSize = 0
         self.mashPairs = collections.defaultdict()
+        self.countSeg = 0
         for (root, dirnames,files) in os.walk(songDir):
             for name in files:
                 if name.endswith(".wav") :
@@ -116,6 +129,9 @@ class Segments(object):
             st = int(phraseBound[v] * 1. * sr)
             ed = int(phraseBound[v+1] * 1. * sr)
             currSeg = Seg(songname, st, ed, y[st:ed], y_harmonic[st:ed], y_percussive[st:ed], sr)
+            currSeg.get_seg_feature()
+            currSeg.idx = self.countSeg
+            self.countSeg += 1
             self.segments.append(currSeg)
         self.mfcc_size = currSeg.mfcc_size            
         self.chroma_size = currSeg.chroma_size
@@ -123,45 +139,43 @@ class Segments(object):
         
         
             
-    def construct_tree(self):
+    def construct_tree(self, alpha = 1, beta = 1, theta = 1):
+        # Initialize tree size
+        self.treeSize = 0
         # construct a tree with the mfcc of the 1st frame of each seg, and beat chroma 
         self.feature_size = self.mfcc_size + self.chroma_size + self.rms_size
         X = np.zeros((len(self.segments), self.feature_size))
         for idx, seg in enumerate(self.segments):
-            X[idx,0:self.mfcc_size] = seg.get_head_mfcc(n=1)
-            X[idx,self.mfcc_size:-self.rms_size] = seg.get_head_chroma(n=1)
-            X[idx,-self.rms_size:] = seg.get_head_rms(n=5)
+            X [idx,:] = seg.get_seg_feature()
+            #X[idx,0:self.mfcc_size] = seg.get_head_mfcc(n=1)
+            #X[idx,self.mfcc_size:-self.rms_size] = seg.get_head_chroma(n=1)
+            #X[idx,-self.rms_size:] = seg.get_head_rms(n=5)
             seg.idx = self.treeSize
             self.treeSize += 1
-            #X = np.array(X).reshape((1,-1))
-
 
         def mydist(x, y):
             
-            #xChroma = x[0:12]
-            #yChroma = y[0:12]
-            #xMfcc = x[12:38]
-            #yMfcc = y[12:38]
-            #xRms = x[38]
-            #yRms = y[38]
+            xMFCC = x[0:self.mfcc_size]
+            yMFCC = y[0:self.mfcc_size]
+            xChroma = x[self.mfcc_size:self.mfcc_size+self.chroma_size]
+            yChroma = y[self.mfcc_size:self.mfcc_size+self.chroma_size]
+            xRms = x[-self.rms_size:]
+            yRms = y[-self.rms_size:]
             
-            #dist = spatial.distance.cosine(xChroma,yChroma) + beta * np.sum((xMfcc-yMfcc)**2)/5000.  +                   theta * np.sum((xRms-yRms)**2)
-            dist = np.sum((x-y)**2)
-            #dist = alpha * np.sum((xChroma-yChroma)**2) + beta * np.sum((xMfcc-yMfcc)**2)/5000.  +  \
-             #    theta * np.sum((xRms-yRms)**2)  #+ np.sum((xEd-ySt)**2)
+            dist1 = np.sum((xMFCC-yMFCC)**2) / 5000
+            dist2 = 1.0 - np.dot(x, y) / (np.linalg.norm(x) * np.linalg.norm(y))
+            #dist2 = spatial.distance.cosine(xChroma,yChroma)     #unknown why this doesn't work
+            dist3 = np.sum((xRms-yRms)**2)
+            dist = alpha * dist1 + beta * dist2 + theta * dist3
             return dist
 
         self.tree = BallTree(X, leaf_size=2, metric = 'pyfunc',func = mydist)
 
 
+
     def find_best_match(self, query_seg_idx, diffSong = False):    
-        f1 = self.get_segment(query_seg_idx).get_tail_mfcc()
-        f2 = self.get_segment(query_seg_idx).get_tail_chroma()
-        f3 = self.get_segment(query_seg_idx).get_tail_rms()
-        query_f = np.hstack((f1,f2))
-        query_f = np.hstack((query_f,f3))
-        query_f = np.array(query_f).reshape((1,-1))
-        dist, idx = self.tree.query(query_f, k=20)
+        query_f = self.segments[query_seg_idx].featureV
+        dist, idx = self.tree.query(query_f, k=30)
         idx = idx[0]
         # remove query_seg_idx from the list
         idx = [p for p in idx if p != query_seg_idx]

@@ -48,7 +48,7 @@ def createMedleyEasy(segs,st_idx, N):
     """
     Given a segs object, a starting index
     Specify the length of the medley, and the output directory
-    Create a medley
+    Create a medley directly from the class
     """
     
     all_idx = [st_idx]
